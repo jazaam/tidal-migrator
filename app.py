@@ -6,7 +6,7 @@ import pandas as pd
 
 # --- CONFIGURAÇÕES ---
 DELAY = 0.1
-VERSION = "v8.5 (Full Unlocked)"
+VERSION = "v8.6 (Bulletproof - Fix Playlists)"
 
 st.set_page_config(page_title="Tidal Migrator Pro", page_icon="🎵", layout="centered")
 
@@ -29,7 +29,6 @@ if 'session_new' not in st.session_state: st.session_state.session_new = None
 if 'logs' not in st.session_state: st.session_state.logs = {'tracks': [], 'playlists': [], 'albums': [], 'artists': []}
 if 'stats' not in st.session_state: st.session_state.stats = {}
 if 'migration_done' not in st.session_state: st.session_state.migration_done = False
-# Trava para o balão não aparecer toda hora
 if 'balloons_shown' not in st.session_state: st.session_state.balloons_shown = False
 
 # --- FUNÇÕES AUXILIARES ---
@@ -94,7 +93,7 @@ def login_manual_streamlit():
 # ==============================================================================
 
 st.title("🎵 Tidal Migrator Pro")
-st.caption(f"v{VERSION}")
+st.caption(f"{VERSION}")
 st.markdown("---")
 
 # 1. ORIGEM
@@ -139,27 +138,24 @@ st.markdown("---")
 # 3. MIGRAÇÃO
 if st.session_state.user_old and st.session_state.user_new:
     
-    # MODO RELATÓRIO (JÁ ACABOU)
     if st.session_state.migration_done:
-        
         if not st.session_state.balloons_shown:
             st.balloons()
             st.session_state.balloons_shown = True
             
         st.success("✨ MIGRAÇÃO FINALIZADA!")
         
-        # Painel de Métricas
         stats = st.session_state.stats
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Músicas Novas", stats.get('tracks_added', 0))
+        c1.metric("Músicas", stats.get('tracks_added', 0))
         c2.metric("Playlists", stats.get('playlists_cloned', 0) + stats.get('playlists_followed', 0))
         c3.metric("Álbuns", stats.get('albums_added', 0))
         c4.metric("Artistas", stats.get('artists_added', 0))
         
         st.markdown("---")
-        st.subheader("🔍 Pesquisar no Relatório")
+        st.subheader("🔍 Relatório Detalhado")
         
-        search_term = st.text_input("Filtrar resultados:", placeholder="Digite nome da música ou playlist...")
+        search_term = st.text_input("Filtrar:", placeholder="Nome da música/playlist...")
         
         tab1, tab2, tab3, tab4 = st.tabs(["🎵 Músicas", "📂 Playlists", "💿 Álbuns", "🎤 Artistas"])
         
@@ -169,40 +165,31 @@ if st.session_state.user_old and st.session_state.user_new:
 
         with tab1:
             data = filter_data(st.session_state.logs['tracks'], search_term)
-            if data: st.dataframe(pd.DataFrame(data, columns=["Músicas Adicionadas"]), use_container_width=True, height=300)
-            else: st.info("Nada encontrado.")
+            if data: st.dataframe(pd.DataFrame(data, columns=["Músicas"]), use_container_width=True, height=300)
+            else: st.info("Nenhuma música adicionada nesta rodada.")
             
         with tab2:
             data = filter_data(st.session_state.logs['playlists'], search_term)
-            if data: st.dataframe(pd.DataFrame(data, columns=["Playlists Processadas"]), use_container_width=True)
-            else: st.info("Nada encontrado.")
+            if data: st.dataframe(pd.DataFrame(data, columns=["Playlists"]), use_container_width=True)
+            else: st.info("Nenhuma playlist processada.")
 
-        with tab3:
-            data = filter_data(st.session_state.logs['albums'], search_term)
-            if data: st.write(data)
-            else: st.info("Vazio.")
-
-        with tab4:
-            data = filter_data(st.session_state.logs['artists'], search_term)
-            if data: st.write(data)
-            else: st.info("Vazio.")
+        with tab3: st.write(filter_data(st.session_state.logs['albums'], search_term))
+        with tab4: st.write(filter_data(st.session_state.logs['artists'], search_term))
             
-        if st.button("🔄 Fazer Nova Migração"):
+        if st.button("🔄 Nova Migração"):
             st.session_state.migration_done = False
             st.session_state.balloons_shown = False 
             st.rerun()
 
-    # MODO EXECUÇÃO (AINDA NÃO COMEÇOU)
     else:
         st.header("🚀 Painel de Migração")
         
         if st.session_state.user_old.id == st.session_state.user_new.id:
-            st.error("⛔ ERRO CRÍTICO: Mesma conta nos dois passos!")
+            st.error("⛔ ERRO: Você conectou a MESMA conta nos dois passos!")
             st.stop()
 
         if st.button("INICIAR CÓPIA AGORA", type="primary", use_container_width=True):
             
-            # Zera logs e Status
             st.session_state.logs = {'tracks': [], 'playlists': [], 'albums': [], 'artists': []}
             stats = {
                 'tracks_added': 0, 'tracks_skipped': 0,
@@ -210,28 +197,41 @@ if st.session_state.user_old and st.session_state.user_new:
                 'playlists_cloned': 0, 'playlists_followed': 0
             }
 
-            with st.spinner("Analisando bibliotecas... (Lendo TUDO, pode demorar!)"):
+            with st.spinner("Analisando o que já existe na conta nova... (Isso evita erros!)"):
                 u_old = st.session_state.user_old
                 u_new = st.session_state.user_new
                 
-                # --- CORREÇÃO IMPORTANTE: limit=None ---
-                # Pega tudo o que já existe na nova para comparar
-                exist_tracks = set([t.id for t in u_new.favorites.tracks(limit=None)])
-                exist_albums = set([a.id for a in u_new.favorites.albums(limit=None)])
-                exist_artists = set([a.id for a in u_new.favorites.artists(limit=None)])
-                exist_pl_names = set([p.name for p in u_new.playlists() if p.creator.id == u_new.id])
-                exist_fav_pl = set([p.id for p in u_new.favorites.playlists(limit=None)])
+                # --- CORREÇÃO V8.6: BLINDAGEM COM TRY/EXCEPT E LIMITES SEGUROS ---
+                # Se falhar em ler algo, ele assume que está vazio (set()) e continua.
+                
+                try: exist_tracks = set([t.id for t in u_new.favorites.tracks(limit=None)])
+                except: exist_tracks = set()
+                
+                try: exist_albums = set([a.id for a in u_new.favorites.albums(limit=2000)])
+                except: exist_albums = set()
+                
+                try: exist_artists = set([a.id for a in u_new.favorites.artists(limit=2000)])
+                except: exist_artists = set()
+                
+                try: exist_pl_names = set([p.name for p in u_new.playlists()]) 
+                except: exist_pl_names = set()
+                
+                # O ERRO ESTAVA AQUI: Mudamos None para 2000
+                try: exist_fav_pl = set([p.id for p in u_new.favorites.playlists(limit=2000)])
+                except: exist_fav_pl = set()
 
             # MÚSICAS
-            st.write("🎵 Baixando TODAS as músicas da conta antiga...")
-            # --- CORREÇÃO IMPORTANTE: limit=None ---
-            old_tracks = u_old.favorites.tracks(limit=None)
-            
-            # Lógica: Só adiciona se o ID não existir na nova
+            st.write("🎵 Baixando Músicas da Origem...")
+            try:
+                old_tracks = u_old.favorites.tracks(limit=None) # Músicas costuma aceitar None
+            except:
+                st.warning("Não foi possível ler todas as músicas de uma vez. Tentando limite de 4000...")
+                old_tracks = u_old.favorites.tracks(limit=4000)
+
             to_add = [t for t in old_tracks if t.id not in exist_tracks][::-1]
             stats['tracks_skipped'] = len(old_tracks) - len(to_add)
             
-            st.write(f"Total encontrado: **{len(old_tracks)}** músicas. Novas para adicionar: **{len(to_add)}**")
+            st.write(f"Encontradas: **{len(old_tracks)}**. Novas a adicionar: **{len(to_add)}**")
 
             if to_add:
                 bar = st.progress(0)
@@ -247,61 +247,67 @@ if st.session_state.user_old and st.session_state.user_new:
                     except: pass
                 txt.empty()
             
-            # OUTROS
-            with st.status("Finalizando Álbuns, Artistas e Playlists...", expanded=True):
+            # OUTROS ITENS
+            with st.status("Processando Álbuns, Artistas e Playlists...", expanded=True):
+                
                 # Álbuns
                 st.write("💿 Álbuns...")
-                for a in u_old.favorites.albums(limit=None):
-                    if a.id not in exist_albums:
-                        try: 
-                            u_new.favorites.add_album(a.id)
-                            stats['albums_added']+=1
-                            st.session_state.logs['albums'].append(f"{a.name} - {a.artist.name}")
-                            time.sleep(DELAY)
-                        except: pass
+                try:
+                    for a in u_old.favorites.albums(limit=2000):
+                        if a.id not in exist_albums:
+                            try: 
+                                u_new.favorites.add_album(a.id)
+                                stats['albums_added']+=1
+                                st.session_state.logs['albums'].append(f"{a.name}")
+                                time.sleep(DELAY)
+                            except: pass
+                except: st.error("Erro ao ler álbuns da origem.")
                 
                 # Artistas
                 st.write("🎤 Artistas...")
-                for a in u_old.favorites.artists(limit=None):
-                    if a.id not in exist_artists:
-                        try: 
-                            u_new.favorites.add_artist(a.id)
-                            stats['artists_added']+=1
-                            st.session_state.logs['artists'].append(a.name)
-                            time.sleep(0.05)
-                        except: pass
+                try:
+                    for a in u_old.favorites.artists(limit=2000):
+                        if a.id not in exist_artists:
+                            try: 
+                                u_new.favorites.add_artist(a.id)
+                                stats['artists_added']+=1
+                                st.session_state.logs['artists'].append(a.name)
+                                time.sleep(0.05)
+                            except: pass
+                except: st.error("Erro ao ler artistas da origem.")
 
                 # Playlists
                 st.write("📂 Playlists...")
-                processed = set()
-                # Pega todas (criadas e favoritas) da antiga
-                all_pl = u_old.playlists() + u_old.favorites.playlists(limit=None)
-                
-                for pl in all_pl:
-                    if pl.id in processed: continue
-                    processed.add(pl.id)
-                    try:
-                        # Se a playlist é SUA (criada por você)
-                        if pl.creator.id == u_old.id:
-                            # Verifica duplicata pelo NOME
-                            if pl.name not in exist_pl_names:
-                                new_pl = u_new.create_playlist(pl.name, pl.description or "")
-                                t_ids = [t.id for t in pl.tracks(limit=None)]
-                                if t_ids: new_pl.add(t_ids)
-                                stats['playlists_cloned'] += 1
-                                st.session_state.logs['playlists'].append(f"[CLONADA] {pl.name}")
-                                st.write(f"🛠️ Clonada: {pl.name}")
-                                time.sleep(1)
-                        # Se a playlist é de OUTRO (seguida)
-                        else:
-                            # Verifica duplicata pelo ID
-                            if pl.id not in exist_fav_pl:
-                                u_new.favorites.add_playlist(pl.id)
-                                stats['playlists_followed'] += 1
-                                st.session_state.logs['playlists'].append(f"[SEGUIDA] {pl.name}")
-                                st.write(f"❤️ Seguindo: {pl.name}")
-                                time.sleep(0.5)
-                    except: pass
+                try:
+                    processed = set()
+                    # Tenta ler tudo com limite seguro
+                    all_pl = u_old.playlists() + u_old.favorites.playlists(limit=2000)
+                    
+                    for pl in all_pl:
+                        if pl.id in processed: continue
+                        processed.add(pl.id)
+                        try:
+                            # SE É SUA (CRIADA)
+                            if pl.creator.id == u_old.id:
+                                if pl.name not in exist_pl_names:
+                                    new_pl = u_new.create_playlist(pl.name, pl.description or "")
+                                    # Limite de 2000 músicas por playlist para não travar
+                                    t_ids = [t.id for t in pl.tracks(limit=2000)]
+                                    if t_ids: new_pl.add(t_ids)
+                                    stats['playlists_cloned'] += 1
+                                    st.session_state.logs['playlists'].append(f"[CLONADA] {pl.name}")
+                                    st.write(f"🛠️ Clonada: {pl.name}")
+                                    time.sleep(1)
+                            # SE É DE OUTRO (SEGUIDA)
+                            else:
+                                if pl.id not in exist_fav_pl:
+                                    u_new.favorites.add_playlist(pl.id)
+                                    stats['playlists_followed'] += 1
+                                    st.session_state.logs['playlists'].append(f"[SEGUIDA] {pl.name}")
+                                    st.write(f"❤️ Seguindo: {pl.name}")
+                                    time.sleep(0.5)
+                        except: pass
+                except Exception as e: st.error(f"Erro nas playlists: {e}")
             
             st.session_state.stats = stats
             st.session_state.migration_done = True
