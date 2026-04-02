@@ -5,8 +5,8 @@ import requests
 import pandas as pd
 
 # --- CONFIGURAÇÕES ---
-DELAY = 0.2 # Aumentado para evitar bloqueio por "Too Many Requests" (HTTP 429)
-VERSION = "v11.0 (Pagination Engine & Error Trace)"
+DELAY = 0.2
+VERSION = "v13.0 (Masterpiece - API Sync & Debug Cofre)"
 
 st.set_page_config(page_title="Tidal Migrator Pro", page_icon="🎵", layout="centered")
 
@@ -19,38 +19,59 @@ def local_css():
         """, unsafe_allow_html=True)
 local_css()
 
+# --- ESTADO (SESSION STATE) ---
 if 'user_old' not in st.session_state: st.session_state.user_old = None
 if 'user_new' not in st.session_state: st.session_state.user_new = None
 if 'session_old' not in st.session_state: st.session_state.session_old = None
 if 'session_new' not in st.session_state: st.session_state.session_new = None
 
+# SISTEMA DE LOGS ESTRUTURADO E PERSISTENTE
 if 'logs' not in st.session_state: 
-    st.session_state.logs = {'tracks': [], 'tracks_skipped': [], 'playlists': [], 'albums': [], 'artists': []}
+    st.session_state.logs = {
+        'success': [],   # Tudo que deu certo
+        'skipped': [],   # Tudo que foi pulado por duplicata
+        'errors': []     # Erros Fatais (400, 429, timeouts)
+    }
 if 'stats' not in st.session_state: st.session_state.stats = {}
 if 'migration_done' not in st.session_state: st.session_state.migration_done = False
-if 'balloons_shown' not in st.session_state: st.session_state.balloons_shown = False
 
 def get_display_name(user):
     full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
     return full_name if full_name else user.username or f"Usuário ID {user.id}"
 
-# --- MOTOR DE PAGINAÇÃO (BURLA O LIMITE DE 200 ITENS) ---
-def fetch_all_paginated(api_func, chunk_size=100):
-    all_items = []
+# --- MOTOR DE EXTRAÇÃO BLINDADO (PAGINAÇÃO MAX 50) ---
+def fetch_paginated(log_label, api_function):
+    """
+    Busca dados na API burlando o limite padrão, mas respeitando o teto de 50 itens 
+    por requisição para evitar o HTTP 400 Bad Request nos endpoints v2 do Tidal.
+    """
+    items = []
     offset = 0
+    limit = 50 
+    
     while True:
         try:
-            chunk = api_func(limit=chunk_size, offset=offset)
-            if not chunk: 
+            chunk = api_function(limit=limit, offset=offset)
+            if not chunk:
                 break
-            all_items.extend(chunk)
+            items.extend(chunk)
             offset += len(chunk)
-            if len(chunk) < chunk_size: 
+            if len(chunk) < limit:
                 break
         except Exception as e:
-            st.error(f"Erro ao paginar na posição {offset}: {e}")
-            break
-    return all_items
+            error_msg = str(e)
+            if offset == 0:
+                # Se falhou no offset 0, tenta sem limite (Fallback nativo do python-tidal)
+                st.session_state.logs['errors'].append(f"[{log_label}] Erro na paginação inicial ({error_msg}). Tentando Fallback Nativo.")
+                try:
+                    return api_function()
+                except Exception as e_fallback:
+                    st.session_state.logs['errors'].append(f"[{log_label}] FALHA FATAL no Fallback: {e_fallback}")
+                    break
+            else:
+                st.session_state.logs['errors'].append(f"[{log_label}] API bloqueou a leitura no item {offset}: {error_msg}")
+                break
+    return items
 
 def login_manual_streamlit():
     session = tidalapi.Session()
@@ -128,181 +149,176 @@ st.markdown("---")
 if st.session_state.user_old and st.session_state.user_new:
     
     if st.session_state.migration_done:
-        if not st.session_state.balloons_shown:
-            st.balloons()
-            st.session_state.balloons_shown = True
-            
         st.success("✨ MIGRAÇÃO FINALIZADA!")
         stats = st.session_state.stats
         
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Músicas Novas", stats.get('tracks_added', 0))
-        col2.metric("Músicas Puladas", stats.get('tracks_skipped', 0), delta="Duplicatas / Erros", delta_color="off")
-        col3.metric("Playlists", stats.get('playlists_cloned', 0) + stats.get('playlists_followed', 0))
-        col4.metric("Outros (Alb/Art)", stats.get('albums_added', 0) + stats.get('artists_added', 0))
+        col1.metric("Adicionados", len(st.session_state.logs['success']))
+        col2.metric("Duplicatas Puladas", len(st.session_state.logs['skipped']))
+        col3.metric("Erros na API", len(st.session_state.logs['errors']))
+        col4.metric("Playlists Tratadas", stats.get('playlists', 0))
         
         st.markdown("---")
-        st.subheader("🔍 Relatório Técnico")
+        st.subheader("🔍 Console de Auditoria")
         
-        search_term = st.text_input("Filtrar resultados:", placeholder="Digite nome da música, artista ou erro...")
-        tab1, tab2, tab3, tab4 = st.tabs(["✅ Adicionadas", "🚫 Logs & Erros", "📂 Playlists", "💿 Álbuns & Artistas"])
+        search_term = st.text_input("Filtrar logs:", placeholder="Pesquise música, artista ou erro...")
+        tab1, tab2, tab3 = st.tabs(["✅ Sucesso", "⏭️ Pulados", "🚨 Erros Fatais (Debug)"])
         
         def filter_data(data_list, term):
             return [item for item in data_list if term.lower() in item.lower()] if term else data_list
 
         with tab1:
-            data = filter_data(st.session_state.logs['tracks'], search_term)
-            if data: st.dataframe(pd.DataFrame(data, columns=["Músicas Adicionadas"]), use_container_width=True, height=300)
-            else: st.info("Nenhuma música.")
+            data = filter_data(st.session_state.logs['success'], search_term)
+            if data: st.dataframe(pd.DataFrame(data, columns=["Status / Ação"]), use_container_width=True, height=400)
+            else: st.info("Nada registrado.")
             
         with tab2:
-            st.caption("Logs de Duplicatas e Erros de API (Crucial para auditoria).")
-            data = filter_data(st.session_state.logs['tracks_skipped'], search_term)
-            if data: st.dataframe(pd.DataFrame(data, columns=["Log do Sistema"]), use_container_width=True, height=300)
-            else: st.info("Limpo.")
+            st.caption("Itens ignorados pelo motor inteligente para proteger sua conta contra duplicação.")
+            data = filter_data(st.session_state.logs['skipped'], search_term)
+            if data: st.dataframe(pd.DataFrame(data, columns=["Motivo / Item"]), use_container_width=True, height=400)
+            else: st.info("Nenhuma duplicata.")
 
         with tab3:
-            data = filter_data(st.session_state.logs['playlists'], search_term)
-            if data: st.dataframe(pd.DataFrame(data, columns=["Playlists Processadas"]), use_container_width=True)
-            else: st.info("Vazio.")
-
-        with tab4: 
-            st.write("**Álbuns:**", filter_data(st.session_state.logs['albums'], search_term))
-            st.write("**Artistas:**", filter_data(st.session_state.logs['artists'], search_term))
+            st.caption("Qualquer recusa do servidor Tidal (Bad Request, Timeout) ficará gravada aqui.")
+            data = filter_data(st.session_state.logs['errors'], search_term)
+            if data: st.dataframe(pd.DataFrame(data, columns=["Traceback Crítico"]), use_container_width=True, height=400)
+            else: st.success("Nenhum erro fatal! Sistema operou 100%.")
             
-        if st.button("🔄 Nova Migração", type="primary"):
+        if st.button("🔄 Executar Novamente", type="primary"):
             st.session_state.migration_done = False
-            st.session_state.balloons_shown = False 
             st.rerun()
 
     else:
-        st.header("🚀 Painel de Execução")
+        st.header("🚀 Painel de Controle de Execução")
         
         if st.session_state.user_old.id == st.session_state.user_new.id:
-            st.error("⛔ ERRO: Mesma conta logada nos dois passos.")
+            st.error("⛔ ERRO CRÍTICO: Mesma conta detectada na Origem e Destino.")
             st.stop()
 
-        if st.button("INICIAR EXTRAÇÃO TOTAL", type="primary", use_container_width=True):
+        if st.button("INICIAR EXTRAÇÃO E MIGRAÇÃO", type="primary", use_container_width=True):
             
-            st.session_state.logs = {'tracks': [], 'tracks_skipped': [], 'playlists': [], 'albums': [], 'artists': []}
-            stats = {'tracks_added': 0, 'tracks_skipped': 0, 'albums_added': 0, 'artists_added': 0, 'playlists_cloned': 0, 'playlists_followed': 0}
+            # Resetando estado dos logs para nova execução
+            st.session_state.logs = {'success': [], 'skipped': [], 'errors': []}
+            stats = {'playlists': 0}
 
-            with st.status("Processamento em Lote...", expanded=True) as status_box:
+            with st.status("Executando Protocolo de Sincronização (Aguarde...)", expanded=True) as status_box:
                 u_old = st.session_state.user_old
                 u_new = st.session_state.user_new
                 
-                st.write("🔍 Extraindo inventário base da conta Destino...")
-                exist_tracks_ids = set()
-                exist_tracks_sig = set()
+                # --- BASE DESTINO (CONSTRUINDO A BARREIRA ANTI-DUPLICAÇÃO) ---
+                st.write("🔍 Mapeando inventário da conta Destino (Nova)...")
+                exist_tracks_ids, exist_tracks_sig = set(), set()
                 
-                # Paginação na conta nova
-                existing_tracks_raw = fetch_all_paginated(u_new.favorites.tracks)
+                existing_tracks_raw = fetch_paginated("Destino Tracks", u_new.favorites.tracks)
                 for t in existing_tracks_raw:
-                    exist_tracks_ids.add(t.id)
-                    exist_tracks_sig.add(f"{t.name} - {t.artist.name}".lower())
+                    try:
+                        exist_tracks_ids.add(t.id)
+                        exist_tracks_sig.add(f"{t.name} - {t.artist.name}".lower())
+                    except: pass
                 
-                exist_albums = set([a.id for a in fetch_all_paginated(u_new.favorites.albums)])
-                exist_artists = set([a.id for a in fetch_all_paginated(u_new.favorites.artists)])
+                exist_albums = set([a.id for a in fetch_paginated("Destino Álbuns", u_new.favorites.albums)])
+                exist_artists = set([a.id for a in fetch_paginated("Destino Artistas", u_new.favorites.artists)])
+                exist_fav_pl = set([p.id for p in fetch_paginated("Destino Playlists Favoritas", u_new.favorites.playlists)])
                 
+                # Playlists Nomes
                 exist_pl_names = set()
-                try: exist_pl_names = set([p.name.lower() for p in u_new.playlists()]) 
-                except Exception as e: st.session_state.logs['tracks_skipped'].append(f"[ERRO API] Falha ler nomes playlists: {e}")
-                
-                exist_fav_pl = set([p.id for p in fetch_all_paginated(u_new.favorites.playlists)])
+                try: 
+                    exist_pl_names = set([p.name.lower() for p in fetch_paginated("Destino Playlists Nomes", u_new.playlists)])
+                except Exception as e:
+                    st.session_state.logs['errors'].append(f"[Mapeamento] Falha ao ler nomes de playlists destino: {e}")
 
-                # MÚSICAS DA CONTA VELHA (AGORA COM PAGINAÇÃO FORÇADA)
-                st.write("🎵 Extraindo TODAS as músicas da Origem (Paginação ativa)...")
-                old_tracks = fetch_all_paginated(u_old.favorites.tracks)
+                # --- EXTRAÇÃO DA ORIGEM ---
+                st.write("🎵 Extraindo Músicas da conta Origem (Velha)...")
+                old_tracks = fetch_paginated("Origem Tracks", u_old.favorites.tracks)
                 
                 to_add = []
                 for t in old_tracks:
-                    sig = f"{t.name} - {t.artist.name}".lower()
-                    if t.id in exist_tracks_ids:
-                        st.session_state.logs['tracks_skipped'].append(f"[PULADO - ID] {t.name} - {t.artist.name}")
-                        stats['tracks_skipped'] += 1
-                    elif sig in exist_tracks_sig:
-                        st.session_state.logs['tracks_skipped'].append(f"[PULADO - NOME] {t.name} - {t.artist.name}")
-                        stats['tracks_skipped'] += 1
-                    else:
-                        to_add.append(t)
+                    try:
+                        sig = f"{t.name} - {t.artist.name}".lower()
+                        if t.id in exist_tracks_ids:
+                            st.session_state.logs['skipped'].append(f"[PULADO: ID EXATO] {t.name} - {t.artist.name}")
+                        elif sig in exist_tracks_sig:
+                            st.session_state.logs['skipped'].append(f"[PULADO: ASSINATURA NOME] {t.name} - {t.artist.name}")
+                        else:
+                            to_add.append(t)
+                    except Exception as e:
+                        st.session_state.logs['errors'].append(f"[Verificação de Duplicata] Erro ao ler track velha: {e}")
 
-                to_add = to_add[::-1] # Ordem cronológica original
-                st.write(f"📊 Volume lido: {len(old_tracks)}. Carga para inserção: {len(to_add)}.")
+                to_add = to_add[::-1] # Inverte para inserir as mais antigas primeiro
+                st.write(f"📊 Volume processado: {len(old_tracks)} lidas. {len(to_add)} novas enviadas para inserção.")
 
                 if to_add:
                     bar = st.progress(0)
                     for i, t in enumerate(to_add):
                         try:
                             u_new.favorites.add_track(t.id)
-                            stats['tracks_added'] += 1
-                            st.session_state.logs['tracks'].append(f"{t.name} - {t.artist.name}")
+                            st.session_state.logs['success'].append(f"[MÚSICA ADD] {t.name} - {t.artist.name}")
                             bar.progress((i+1)/len(to_add))
-                            time.sleep(DELAY) # Proteção contra limite de requisição
+                            time.sleep(DELAY)
                         except Exception as e:
-                            st.session_state.logs['tracks_skipped'].append(f"[ERRO ADD TRACK] {t.name}: {e}")
-                            stats['tracks_skipped'] += 1
+                            st.session_state.logs['errors'].append(f"[FALHA INSERÇÃO MÚSICA] {t.name}: {e}")
                 
-                st.write("💿 Processando Álbuns...")
-                for a in fetch_all_paginated(u_old.favorites.albums):
+                # --- ÁLBUNS E ARTISTAS ---
+                st.write("💿 Processando Álbuns e Artistas...")
+                for a in fetch_paginated("Origem Álbuns", u_old.favorites.albums):
                     if a.id not in exist_albums:
                         try: 
                             u_new.favorites.add_album(a.id)
-                            stats['albums_added']+=1
-                            st.session_state.logs['albums'].append(f"{a.name}")
+                            st.session_state.logs['success'].append(f"[ÁLBUM ADD] {a.name}")
                             time.sleep(DELAY)
                         except Exception as e:
-                            st.session_state.logs['tracks_skipped'].append(f"[ERRO ÁLBUM] {a.name}: {e}")
+                            st.session_state.logs['errors'].append(f"[FALHA INSERÇÃO ÁLBUM] {a.name}: {e}")
+                    else:
+                        st.session_state.logs['skipped'].append(f"[PULADO: ÁLBUM] {a.name}")
                 
-                st.write("🎤 Processando Artistas...")
-                for a in fetch_all_paginated(u_old.favorites.artists):
+                for a in fetch_paginated("Origem Artistas", u_old.favorites.artists):
                     if a.id not in exist_artists:
                         try: 
                             u_new.favorites.add_artist(a.id)
-                            stats['artists_added']+=1
-                            st.session_state.logs['artists'].append(a.name)
+                            st.session_state.logs['success'].append(f"[ARTISTA ADD] {a.name}")
                             time.sleep(DELAY)
                         except Exception as e:
-                            st.session_state.logs['tracks_skipped'].append(f"[ERRO ARTISTA] {a.name}: {e}")
+                            st.session_state.logs['errors'].append(f"[FALHA INSERÇÃO ARTISTA] {a.name}: {e}")
+                    else:
+                        st.session_state.logs['skipped'].append(f"[PULADO: ARTISTA] {a.name}")
 
+                # --- PLAYLISTS ---
                 st.write("📂 Processando Playlists...")
                 processed = set()
                 
-                try:
-                    # Captura explícita para evitar falhas silenciosas
-                    my_old_pls = u_old.playlists()
-                    fav_old_pls = fetch_all_paginated(u_old.favorites.playlists)
-                    all_pl = my_old_pls + fav_old_pls
-                    
-                    for pl in all_pl:
-                        if pl.id in processed: continue
-                        processed.add(pl.id)
-                        
-                        try:
-                            if pl.creator.id == u_old.id:
-                                if pl.name.lower() not in exist_pl_names:
-                                    new_pl = u_new.create_playlist(pl.name, pl.description or "")
-                                    # Paginando também as faixas internas da playlist
-                                    t_ids = [t.id for t in fetch_all_paginated(pl.tracks)]
-                                    if t_ids: new_pl.add(t_ids)
-                                    stats['playlists_cloned'] += 1
-                                    st.session_state.logs['playlists'].append(f"[CLONADA] {pl.name}")
-                                    time.sleep(1)
-                                else:
-                                    st.session_state.logs['tracks_skipped'].append(f"[PLAYLIST IGNORADA] Já existe '{pl.name}'")
-                            else:
-                                if pl.id not in exist_fav_pl:
-                                    u_new.favorites.add_playlist(pl.id)
-                                    stats['playlists_followed'] += 1
-                                    st.session_state.logs['playlists'].append(f"[SEGUIDA] {pl.name}")
-                                    time.sleep(0.5)
-                        except Exception as e:
-                            st.session_state.logs['tracks_skipped'].append(f"[ERRO PLAYLIST] {pl.name}: {e}")
-                except Exception as e:
-                    st.session_state.logs['tracks_skipped'].append(f"[ERRO GERAL PLAYLISTS]: {e}")
+                my_old_pls = fetch_paginated("Origem Minhas Playlists", u_old.playlists)
+                fav_old_pls = fetch_paginated("Origem Playlists Favoritas", u_old.favorites.playlists)
+                all_pl = my_old_pls + fav_old_pls
                 
-                status_box.update(label="Processamento Concluído", state="complete", expanded=False)
+                for pl in all_pl:
+                    if pl.id in processed: continue
+                    processed.add(pl.id)
+                    
+                    try:
+                        if pl.creator.id == u_old.id:
+                            if pl.name.lower() not in exist_pl_names:
+                                new_pl = u_new.create_playlist(pl.name, pl.description or "")
+                                tracks_raw = fetch_paginated(f"Origem Tracks da Playlist {pl.name}", pl.tracks)
+                                t_ids = [t.id for t in tracks_raw]
+                                if t_ids: new_pl.add(t_ids)
+                                st.session_state.logs['success'].append(f"[PLAYLIST CLONADA] {pl.name}")
+                                stats['playlists'] += 1
+                                time.sleep(1)
+                            else:
+                                st.session_state.logs['skipped'].append(f"[PULADO: PLAYLIST NOME IGUAL] {pl.name}")
+                        else:
+                            if pl.id not in exist_fav_pl:
+                                u_new.favorites.add_playlist(pl.id)
+                                st.session_state.logs['success'].append(f"[PLAYLIST SEGUIDA] {pl.name}")
+                                stats['playlists'] += 1
+                                time.sleep(0.5)
+                            else:
+                                st.session_state.logs['skipped'].append(f"[PULADO: PLAYLIST JÁ SEGUIDA] {pl.name}")
+                    except Exception as e:
+                        st.session_state.logs['errors'].append(f"[FALHA CLONAGEM PLAYLIST] {pl.name}: {e}")
+                
+                status_box.update(label="✅ Operação Concluída com Sucesso", state="complete", expanded=False)
             
             st.session_state.stats = stats
             st.session_state.migration_done = True
-            st.session_state.balloons_shown = False 
             st.rerun()
